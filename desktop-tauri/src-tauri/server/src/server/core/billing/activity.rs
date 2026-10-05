@@ -7,7 +7,8 @@
 //!
 //! 从 billing/mod.rs 拆出（单文件行数约定）。banner / ambassador **吞掉所有错误
 //! 返回 null**（装饰性内容，拉不到不该让首屏报错）；组合动作里的签到失败则收敛成
-//! `{success:false}` 交给前端显示成 warn，只有国际版无签到是硬错误。
+//! `{success:false}` 交给前端显示成 warn，只有「查签到状态」失败是硬错误
+//! （登录态过期、网络故障这类，用户需要知道原因）。
 
 use serde_json::{json, Map, Value};
 
@@ -15,7 +16,7 @@ use crate::server::core::endpoints::RESPONSE_CODE_OK;
 use crate::server::logging;
 
 use super::request::{js_truthy, CallOptions, ACTIVITY_AMBASSADOR, ACTIVITY_BANNER};
-use super::{assert_checkin_supported, BillingError, BillingService};
+use super::{BillingError, BillingService};
 
 impl BillingService {
     // ─── 活动 ───────────────────────────────────────────────
@@ -171,8 +172,6 @@ impl BillingService {
     /// 签到 + 查余额的组合动作（"签到并回报最新积分"）。
     ///
     /// 已签到时不重复领取，直接返回当前额度。
-    /// 国际版没有签到活动：不吞成「签到失败」，而是直接抛出，
-    /// 让调用方拿到明确原因（`checkinStatus` 那一步也会先抛）。
     ///
     /// 并发语义：Node 用 `Promise.all` 并发跑「查状态 + 领取」。
     /// 这里必须**顺序**执行 —— 两者共享同一个底层连接池没问题，
@@ -188,7 +187,6 @@ impl BillingService {
             Some(session) => session.clone(),
             None => self.require_session().await?,
         };
-        assert_checkin_supported(&active)?;
 
         // 查状态与领取：Node 并发，这里顺序（理由见上）。
         // 领取失败不抛出 —— 收敛成 `{success:false, code:-1, msg}`，与 Node 的

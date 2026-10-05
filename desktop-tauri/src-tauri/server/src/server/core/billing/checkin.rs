@@ -5,8 +5,8 @@
 //! 定时签到（core::auto_checkin，对照 workbuddy-auto-checkin.mjs）与
 //! `POST /api/accounts/checkin` 必须是**同一段逻辑**。Node 版靠依赖注入做到这点：
 //! `createAutoCheckin({ runCheckin: id => accountRoutes.runCheckin(id) })` ——
-//! 调度器拿到的就是账号路由里那个函数，所以「限额跳过、国际版排除、串行防风」
-//! 的规则只维护一份，不存在两套行为。
+//! 调度器拿到的就是账号路由里那个函数，所以「限额跳过、无签到活动的版本/
+//! 提供商排除、串行防风」的规则只维护一份，不存在两套行为。
 //!
 //! Rust 侧的 core 不能依赖 api（core 不认识 axum，见 core/mod.rs 的约定），
 //! 于是把这段共享逻辑放到这里：api/accounts.rs 与 core/auto_checkin 各自持有
@@ -28,12 +28,12 @@
 //!
 //! 仍然要看的只剩两处，两条路径各自一致：`available`（批量路径过滤，单账号不看 ——
 //! Node 版既定语义：账号暂时不可用不影响手动操作）与 `supports_checkin`
-//! （国际版没有签到活动，两条路径都排除）。
+//! （没有签到活动的版本与提供商两条路径都排除，判据见函数注释）。
 //!
 //! ── `skipped` 的分母 ────────────────────────────────────────
-//! 「可用账号总数 − 可签到数」，只可能由**国际版**与**范围外的提供商**两类构成
-//! （`enabled` 不再参与），与 /api/accounts/usage 的「只算被禁用的」口径不同 ——
-//! 两个动作的「不适用」集合本来就不一样。
+//! 「可用账号总数 − 可签到数」，只可能由**没有签到活动的版本 / 提供商**与
+//! **范围外的提供商**两类构成（`enabled` 不再参与），与 /api/accounts/usage 的
+//! 「只算被禁用的」口径不同 —— 两个动作的「不适用」集合本来就不一样。
 
 use serde_json::{json, Value};
 
@@ -42,7 +42,8 @@ use crate::server::core::billing::BillingService;
 use crate::server::logging;
 
 /// 签到路径上的错误。对应 Node 版抛出的 AccountStoreError：
-/// 404「账号不存在」与 400「国际版账号暂不支持签到」。
+/// 404「账号不存在」与 400「国际版账号暂不支持签到」（后者是 edition 白名单的
+/// 兜底出口 —— 现在两个带 edition 的家都已放行，新家没进白名单前会命中它）。
 #[derive(Clone, Debug)]
 pub struct CheckinError {
     pub message: String,
@@ -61,13 +62,32 @@ impl std::fmt::Display for CheckinError {
     }
 }
 
-/// 国际版没有签到活动，签到相关操作一律排除该版本账号
-/// （Node: `account.edition !== 'intl'`）。
+/// 「这家的这个账号」能不能签到。
 ///
-/// **Qoder 也吃这条判据**：它的公开账号形态带 `edition`（`account_store` 把
-/// `Region::edition()` 写进公开字段，global → `intl`），而签到活动只有中国版有
-/// （国际版的 legacy 签到路径 404、活动列表里只有促销），于是「非 intl」这一条
-/// 刚好把国际版 Qoder 排除、放行中国版 —— 不需要为它再加一条 provider 特判。
+/// ── 版本（edition）判据：intl 默认排除，按家放行 ────────────
+/// `edition: "intl"` 的账号**默认**没有签到活动，白名单里的家才放行。
+///
+/// **WorkBuddy**：国内版与国际版是**同一条计费协议**（两版仅站点不同，见
+/// `endpoints.rs` 的模块头），签到接口 `POST /v2/billing/meter/daily-checkin`
+/// 各自打到账号自己会话的 endpoint 上；国际站 2026-10 起也上线了每日签到活动。
+///
+/// **Qoder**：活动平台（`sash` 一族接口）**双区域通用** —— 列表与领取的路径、
+/// 请求头、响应形态完全一致，只差 openapi 主机名（`qoder.sh` / `qoder.com.cn`，
+/// 见 `providers::qoder::endpoints`）；国际版账号有没有活动可领是账号侧状态，
+/// 由领取链路如实回报（见 `providers::qoder::checkin` 的模块头）。
+///
+/// 其余带 edition 的家（现在没有）新增时**默认挡住**，确认上游真的给了活动再进
+/// 白名单 —— 与其放一家打不出结果的，不如挡一家等证据。ZCode 的公开形态里
+/// edition 放的是 provider id（`"zcode-intl"`），从不等于 `"intl"`，本来就不吃
+/// 这条判据 —— 它能不能签到由 CHECKIN_PROVIDERS 与 `checkin_for` 的分派决定。
+///
+/// ── 提供商判据 ────────────────────────────────────────────
+/// CodeArts 与 Trae 两家都没有「签到」链路，必须先排除：
+/// `checkin_for` 的分派 match 把「不在范围里的家」报成「未接入」，而这两家
+/// 的按钮在界面上由能力位 `checkin: false` 收起 —— 这一层是批量路径
+/// （`resolve_checkin_targets` 的 filter）与 API 直调的兜底，双保险。
+/// 注意 CodeArts 的每日福利**不是**签到（那是 ops 福利领取，独立的「领福利」
+/// 按钮，见 `providers::codearts::welfare`），与这条链无交集。
 ///
 /// Accio 系（两个地区）**整家**也没有签到活动：上游客户端全包检索不到
 /// 「签到 / checkin / 每日任务」的任何痕迹（见 `providers::accio` 的模块头）。
@@ -77,25 +97,25 @@ impl std::fmt::Display for CheckinError {
 /// 这一步是**必需的**：不在范围的家会落到 `checkin_for` 的分派里，拿另一家的
 /// 令牌去打错的签到接口只会稳定报错（见那里的最后两条分支）。
 pub fn supports_checkin(account: &Value) -> bool {
-    if account.get("edition").and_then(Value::as_str) == Some("intl") {
-        return false;
-    }
     let provider = account
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or(crate::server::core::providers::DEFAULT_PROVIDER_ID);
-    // CodeArts 与 Trae 两家都没有「签到」链路，必须先排除：
-    // `checkin_for` 的分派 match 把「不在范围里的家」报成「未接入」，而这两家
-    // 的按钮在界面上由能力位 `checkin: false` 收起 —— 这一层是批量路径
-    // （`resolve_checkin_targets` 的 filter）与 API 直调的兜底，双保险。
-    // 注意 CodeArts 的每日福利**不是**签到（那是 ops 福利领取，独立的「领福利」
-    // 按钮，见 `providers::codearts::welfare`），与这条链无交集。
     if provider == crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID
         || provider == crate::server::core::account_store::TRAE_PROVIDER_ID
     {
         return false;
     }
-    !crate::server::core::account_store::is_accio_family(provider)
+    if crate::server::core::account_store::is_accio_family(provider) {
+        return false;
+    }
+    if account.get("edition").and_then(Value::as_str) == Some("intl")
+        && provider != crate::server::core::providers::DEFAULT_PROVIDER_ID
+        && provider != crate::server::core::account_store::QODER_PROVIDER_ID
+    {
+        return false;
+    }
+    true
 }
 
 /// 账号的提供商 id（缺失时按默认 provider 处理，与账号存储的兜底口径一致）。
@@ -135,18 +155,19 @@ fn accounts_of(store: &AccountStore) -> Vec<Value> {
 
 /// 签到目标集合。
 ///
-/// 批量（`id` 为空）：可用账号 ∩ **提供商在 `providers` 范围内** ∩ 非国际版，
+/// 批量（`id` 为空）：可用账号 ∩ **提供商在 `providers` 范围内** ∩ 该版本支持签到，
 /// `skipped` = 可用总数 − 可签到数。范围由配置给出（WorkBuddy / 小浣熊 / AutoClaw
 /// 可勾选），定时签到与账号页批量签到共用同一份口径。**禁用账号照常参与** ——
 /// 签到与转发是两件事（见模块头「签到不看 enabled」）。
 ///
 /// 指定 id：命中即用（**不过滤 available，也不过滤 provider**），
-/// 国际版直接报 400 —— 用户点的是谁就签谁，与「显式指定就执行」的既有语义一致；
-/// 批量路径必须过滤 available 与 provider，否则会把范围外的账号也签一遍。
+/// 没有签到活动的版本直接报 400 —— 用户点的是谁就签谁，与「显式指定就执行」
+/// 的既有语义一致；批量路径必须过滤 available 与 provider，否则会把范围外的
+/// 账号也签一遍。
 ///
 /// ── 两条路径的「不满足条件」为什么语义不同（有意如此）──────────
 ///   批量路径 → **静默跳过**（计入 `skipped`）：定时任务会一次扫过几十个账号，
-///     用户没在看着，为一个「国际版没有签到活动」把整轮任务报错没有意义。
+///     用户没在看着，为一个「这个版本没有签到活动」把整轮任务报错没有意义。
 ///   单账号路径 → **明确 400 + 原因**：用户显式点了某个账号的按钮，
 ///     他需要知道为什么不行。静默成功或静默跳过都会让他以为签到了。
 /// 所以 `supports_checkin` 在单账号路径报错、在批量路径过滤掉 ——
@@ -165,10 +186,9 @@ pub fn resolve_checkin_targets(
         if found.is_empty() {
             return Err(CheckinError::new("账号不存在", 404));
         }
-        // 唯一的拒绝理由：上游这一站根本没有签到活动（国际版）。
-        // 文案与账号页明细面板里那句「国际版暂无签到活动」同源同义
-        // （见 ui/accounts-model.js 的 checkinPanelHtml）—— 两处说法不一致
-        // 会让用户以为遇到的是两个不同的问题。
+        // 唯一的拒绝理由：这个版本不在签到白名单里（supports_checkin 的 edition
+        // 判据）。WorkBuddy / Qoder 的国际版都已放行，现在没有家会命中它 ——
+        // 它是新家接入前的兜底出口。文案保留「国际版」的说法：判据只拦国际版。
         if !supports_checkin(&found[0]) {
             return Err(CheckinError::new("国际版账号暂不支持签到", 400));
         }
@@ -193,7 +213,7 @@ pub fn resolve_checkin_targets(
 ///   - **小浣熊**：桌面登录积分链路（`providers::raccoon::balance::claim_daily_grant`）；
 ///   - **AutoClaw**：通用任务接口的 `daily_signin` 任务
 ///     （`providers::autoclaw::checkin::claim_daily_signin`）；
-///   - **Qoder**：活动（campaign）领取链路，只有中国版有
+///   - **Qoder**：活动（campaign）领取链路，双区域通用
 ///     （`providers::qoder::checkin::claim_daily_checkin`）。
 ///
 /// 拿一家的 token 去打另一家的签到接口只会稳定报错，所以这条分派是必需的而不是
@@ -233,9 +253,8 @@ pub async fn checkin_for(
             claim_result(id, name, &display, true, claim)
         }
         "qoder" => {
-            // 中国版的每日权益以活动（campaign）形式下发；国际版没有签到计划，
-            // 它由 `supports_checkin` 挡在入口（Qoder 公开形态带 edition），
-            // 实现里的国际版文案只是兜底。
+            // 两个地区的每日权益都以活动（campaign）形式下发（活动平台双区域
+            // 通用，只差 openapi 主机名）；账号侧没被下发活动时实现给中性结果。
             let claim =
                 crate::server::core::providers::qoder::checkin::claim_daily_checkin(store, &id)
                     .await

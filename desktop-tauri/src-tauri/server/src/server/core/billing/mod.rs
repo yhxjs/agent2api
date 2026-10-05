@@ -41,7 +41,7 @@ use serde_json::{json, Map, Value};
 use crate::server::config;
 use crate::server::core::auth::AuthService;
 use crate::server::core::auth_http::{send_raw, ApiResponse};
-use crate::server::core::endpoints::{normalize_endpoint, resolve_edition, RESPONSE_CODE_OK};
+use crate::server::core::endpoints::{normalize_endpoint, RESPONSE_CODE_OK};
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::logging;
 
@@ -346,7 +346,6 @@ impl BillingService {
             Some(session) => session.clone(),
             None => self.require_session().await?,
         };
-        assert_checkin_supported(&active)?;
         let result = self
             .call_billing(
                 BILLING_CHECKIN_STATUS,
@@ -361,6 +360,10 @@ impl BillingService {
 
     /// 领取每日签到积分（AuthService.claimDailyCheckin）。
     ///
+    /// 国内版与国际版**同一条链路**（协议一致、只差站点，见 `endpoints.rs`），
+    /// 各自打到自己会话的 endpoint 上；国际站 2026-10 起也上线了每日签到活动，
+    /// 此前「国际版一律 400」的守卫随之退场。
+    ///
     /// 幂等：已领取时上游返回非 0 code，这里原样返回 `{success:false, code, msg}` ——
     /// 「今天已签到」不是错误，前端面板会把它显示成一条 warn 提示。
     pub async fn claim_daily_checkin(&self, session: Option<&Value>) -> Result<Value, BillingError> {
@@ -368,7 +371,6 @@ impl BillingService {
             Some(session) => session.clone(),
             None => self.require_session().await?,
         };
-        assert_checkin_supported(&active)?;
         let result = self
             .call_billing(
                 BILLING_DAILY_CHECKIN,
@@ -420,14 +422,4 @@ fn has_access_token(session: &Value) -> bool {
         .and_then(|auth| auth.get("accessToken"))
         .map(request::js_truthy)
         .unwrap_or(false)
-}
-
-/// 国际版（www.workbuddy.ai）目前没有签到活动，调用上游只会拿到无意义的结果。
-/// 这里统一拦截，避免各入口（CLI / HTTP / 桌面端）分别判断漏掉。
-fn assert_checkin_supported(session: &Value) -> Result<(), BillingError> {
-    let info = resolve_edition(session.get("edition").and_then(Value::as_str));
-    if info.id == "intl" {
-        return Err(BillingError::new("国际版账号暂无签到活动", 400));
-    }
-    Ok(())
 }

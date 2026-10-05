@@ -1,0 +1,7 @@
+# 由工具以 LF 落盘的生成物（前端构建产物 / npm lockfile）：固定按 LF 归一，
+# 覆盖 core.autocrlf=true 的 CRLF 期望 —— 否则构建产物在「检出 CRLF / 构建 LF」
+# 之间反复横跳，出现「内容无差异却显示已修改」的行尾幻影
+# （git diff 为空、status 恒 M，且缓存 stat 尺寸不符时 git 不做内容比对，永不自愈）。
+desktop-tauri/ui/islands/ui.js text eol=lf
+desktop-tauri/ui/islands/ui.css text eol=lf
+desktop-tauri/ui-islands/package-lock.json text eol=lf

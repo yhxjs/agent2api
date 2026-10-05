@@ -45,7 +45,7 @@ import {
 } from './accounts-domain'
 import { PRIORITY_MAX, PRIORITY_MIN, priorityOf } from './accounts-columns'
 import {
-  PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick, checkinErrorOf,
+  PROXY_CUSTOM_CURRENT, PROXY_CUSTOM_EDIT, applyProxyPick, checkinErrorOf, checkinNoticeOf,
   commitPriority, connectionsOf, maskName, moveAccount, openSettingsDialog, poolError,
   proxyPoolSnapshot, queryUsageOnce, runCheckin, setAccountEnabled, setPanelOpen,
   startCodeArtsWelfare, startZcodeClaim, toggleNamesHidden, usageEntries, usageFailureOf,
@@ -634,7 +634,7 @@ export function ActionsCell({ account, atFront }: { account: AccountRecord; atFr
     <div className='acct-actions'>
       {canCheckin ? (
         checkedIn ? (
-          <Button variant='outline' size='xs' disabled title={checkinDoneTitle(account)}>已签到</Button>
+          <Button variant='outline' size='xs' disabled title={checkinNoticeOf(account.id) || checkinDoneTitle(account)}>已签到</Button>
         ) : (
           // 上一次失败的原因挂在这颗按钮的 title 上（toast 几秒就没了，
           // 而「为什么没签上」要能复看）—— 签到没有明细面板，见 accounts-data.ts
