@@ -51,6 +51,7 @@ import {
   addProviderPrompt,
   addRetryCode,
   applyUnits,
+  cancelLanRegister,
   clearDegrade,
   dropLastRetryCode,
   exportAccounts,
@@ -74,6 +75,7 @@ import {
   renderSanitize,
   renderSettings,
   renderStorage,
+  resolveLanConfirm,
   resolveRetentionConfirm,
   restoreCategory,
   saveCaptcha,
@@ -91,8 +93,13 @@ import {
   saveToggle,
   selectCategory,
   showCategory,
+  submitLanRegister,
+  toggleLan,
+  toggleLanPanel,
   useSettings,
   type DebugState,
+  type LanConfirm,
+  type LanRegister,
   type LoadStatus,
   type NumericState,
   type PromptState,
@@ -282,6 +289,15 @@ function RefreshButton({ id, onClick }: { id: string; onClick: () => void }) {
 
 /* ─── 通用分类 ─────────────────────────────── */
 
+/** 「局域网访问」面板的状态行：开着时给出局域网设备该填的 API 地址 */
+function lanStateText(snap: SettingsSnapshot): string {
+  const { lanAccess, lanPanel, lanIp, port } = snap.app
+  if (!lanAccess) return '未开启：网关只监听 127.0.0.1，仅本机可以访问。'
+  const base = `http://${lanIp || '<本机IP>'}${port ? `:${port}` : ''}`
+  const panel = lanPanel ? '；网页管理面板已一并开放（浏览器打开同一地址）' : ''
+  return `已开启：其他设备把 API 地址指向 ${base}/v1${panel}。`
+}
+
 function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
   const app = snap.app
   const appState = app.status === 'unavailable'
@@ -324,6 +340,33 @@ function GeneralPane({ snap }: { snap: SettingsSnapshot }) {
           <div className='settings-state'>{appState}</div>
         </div>
       </section>
+
+      {!snap.panelLogin && (
+        <section className='panel'>
+          <PanelHead title='局域网访问' tip={TIPS.lan} />
+          <div className='panel-body'>
+            <div className='settings-switches'>
+              {/* 开 / 关都不直接落盘：走确认框（→ 需要时注册管理员 → 写设置并重启），
+                  流程与文案在 settings-state 的 toggleLan / resolveLanConfirm */}
+              <SwitchRow
+                id='settings-lan-access'
+                label='允许局域网内的设备访问网关'
+                checked={snap.app.lanAccess}
+                disabled={snap.busy === 'lan'}
+                onCheckedChange={toggleLan}
+              />
+              <SwitchRow
+                id='settings-lan-panel'
+                label='同时开放网页管理面板'
+                checked={snap.app.lanPanel}
+                disabled={snap.busy === 'lan' || !snap.app.lanAccess}
+                onCheckedChange={toggleLanPanel}
+              />
+            </div>
+            <div className='settings-state'>{lanStateText(snap)}</div>
+          </div>
+        </section>
+      )}
 
       <section className='panel'>
         <PanelHead title='计量单位' tip={TIPS.units} />
@@ -1425,6 +1468,148 @@ function RetentionConfirmDialog({ confirm }: { confirm: { head: string } | null 
   )
 }
 
+/* ─── 局域网访问的确认 / 注册弹窗 ─────────────── */
+
+/** 三种确认（开启 / 关闭 / 面板子开关）各自的标题、正文与确认键文案 */
+const LAN_CONFIRM_COPY: Record<
+  NonNullable<LanConfirm>['mode'],
+  { title: string; body: (panel: boolean) => React.ReactNode; label: string }
+> = {
+  enable: {
+    title: '开启局域网访问',
+    body: () => (
+      <>
+        为了安全，开启前需要先注册一个<b>面板管理员账号</b>（已注册过会跳过这一步，直接生效）。
+        <br />
+        开启后网关将监听所有网卡，同一局域网内的设备即可把 API 地址指向本机 IP 一起使用；管理接口从此要求
+        管理员会话或网关 Key，转发接口在没有一把启用的 Key 时也会拒绝服务（届时会自动创建一把名为「默认」的 Key）。
+        <br />
+        <strong>保存后应用将重启以生效。</strong>确定继续？
+      </>
+    ),
+    label: '继续',
+  },
+  disable: {
+    title: '关闭局域网访问',
+    body: () => (
+      <>
+        关闭后网关回到只监听 127.0.0.1，局域网内的设备将无法继续访问；已配置的网关 Key 与账号都不受影响。
+        <br />
+        <strong>保存后应用将重启以生效。</strong>确定继续？
+      </>
+    ),
+    label: '关闭并重启',
+  },
+  panel: {
+    title: '变更网页管理面板',
+    body: panel =>
+      panel ? (
+        <>
+          开放后，局域网内其他设备的浏览器打开本机 IP 即可进入管理面板（需管理员账号登录）。
+          <br />
+          <strong>保存后应用将重启以生效。</strong>确定继续？
+        </>
+      ) : (
+        <>
+          关闭后，管理界面不再从局域网提供，只有本机的桌面程序可以管理；已开启的 API 转发不受影响。
+          <br />
+          <strong>保存后应用将重启以生效。</strong>确定继续？
+        </>
+      ),
+    label: '保存并重启',
+  },
+}
+
+/**
+ * 局域网访问的两段式弹窗（骨架照 RetentionConfirmDialog）：
+ *   · 确认段（`confirm` 非空）：开 / 关 / 面板子开关各自的后果与「需重启」；
+ *   · 注册段（`register` 非空）：确认开启但还没有管理员时接着出现的表单 ——
+ *     就是确认文案里说的「注册管理员账号」那一步，注册成功由流程层直接继续
+ *     开启（`submitLanRegister`），用户不需要再点一次确认。
+ * 取消 / 右上角 ✕ / 点遮罩 / Esc 都算「不继续」：开关保持原状（受控组件自动弹回）。
+ * 注册段焦点落在取消键：表单里有未提交的输入，敲回车该走提交而不是关闭。
+ */
+function LanDialog({ confirm, register }: { confirm: LanConfirm; register: LanRegister }) {
+  const cancelRef = React.useRef<HTMLButtonElement | null>(null)
+  const nameRef = React.useRef<HTMLInputElement | null>(null)
+  const passwordRef = React.useRef<HTMLInputElement | null>(null)
+
+  const open = confirm !== null || register !== null
+  const close = () => {
+    if (register !== null) cancelLanRegister()
+    else resolveLanConfirm(false)
+  }
+  const submitRegister = () => {
+    submitLanRegister(nameRef.current?.value ?? '', passwordRef.current?.value ?? '')
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={next => { if (!next) close() }}>
+      <DialogContent className='w-[min(480px,calc(100vw-48px))]' initialFocus={cancelRef}>
+        {register !== null ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>注册管理员账号</DialogTitle>
+            </DialogHeader>
+            <DialogBody>
+              <div>
+                局域网开放后，管理接口要求登录。请设置管理员账号与密码，注册完成会直接继续开启流程。
+              </div>
+              {/* 允许浏览器自带的账号密码记忆：autoComplete 与登录页同款 */}
+              <form
+                onSubmit={event => { event.preventDefault(); if (!register.busy) submitRegister() }}
+              >
+                <Label htmlFor='lan-admin-name' className='mt-3.5 mb-[5px] block text-[12.5px]'>账号</Label>
+                {/* 提交时壳侧按 ref 读值（submitLanRegister），ref 必须真的挂上 */}
+                <Input ref={nameRef} id='lan-admin-name' autoComplete='username' placeholder='管理员账号' disabled={register.busy} />
+                <Label htmlFor='lan-admin-password' className='mt-3.5 mb-[5px] block text-[12.5px]'>密码</Label>
+                <Input
+                  ref={passwordRef}
+                  id='lan-admin-password'
+                  type='password'
+                  autoComplete='new-password'
+                  placeholder='至少 8 位'
+                  disabled={register.busy}
+                />
+              </form>
+              <div className='mt-3 min-h-5 text-[13px] whitespace-pre-wrap text-destructive'>
+                {register.error}
+              </div>
+            </DialogBody>
+            <DialogFooter>
+              <div className='mr-auto' />
+              <Button ref={cancelRef} variant='outline' onClick={cancelLanRegister} disabled={register.busy}>
+                取消
+              </Button>
+              <Button onClick={submitRegister} disabled={register.busy}>
+                {register.busy ? '正在注册…' : '注册并开启'}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle>{confirm ? LAN_CONFIRM_COPY[confirm.mode].title : ''}</DialogTitle>
+            </DialogHeader>
+            <DialogBody>
+              <div>{confirm ? LAN_CONFIRM_COPY[confirm.mode].body(confirm.panel) : null}</div>
+            </DialogBody>
+            <DialogFooter>
+              <div className='mr-auto' />
+              <Button ref={cancelRef} variant='outline' onClick={() => resolveLanConfirm(false)}>
+                取消
+              </Button>
+              <Button onClick={() => resolveLanConfirm(true)}>
+                {confirm ? LAN_CONFIRM_COPY[confirm.mode].label : '继续'}
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /* ─── 页面 ─────────────────────────────────── */
 
 function SettingsPage() {
@@ -1496,6 +1681,7 @@ function SettingsPage() {
       </div>
 
       <RetentionConfirmDialog confirm={snap.retentionConfirm} />
+      <LanDialog confirm={snap.lanConfirm} register={snap.lanRegister} />
     </div>
   )
 }

@@ -19,7 +19,14 @@
 /* ─── 桥与共享全局 ─────────────────────────── */
 
 /** 启动与托盘设置（壳命令 get_app_settings / save_app_settings） */
-export type AppSettings = { closeToTray: boolean; autostart: boolean }
+export type AppSettings = {
+  closeToTray: boolean
+  autostart: boolean
+  /** 局域网访问：监听 0.0.0.0（改动随「应用重启」生效，见 TIPS.lan） */
+  lanAccess: boolean
+  /** 局域网访问开启时是否同时托管网页管理面板（同样随重启生效） */
+  lanPanel: boolean
+}
 
 /** 导入失败项：customProvider 标记的那条不是账号，是自定义提供商定义 */
 export type ImportError = { id?: string; message?: string; customProvider?: boolean }
@@ -114,6 +121,17 @@ export type SettingsBridge = {
   getCaptchaSetting(): Promise<{ captchaEnabled?: boolean } | null | undefined>
   saveCaptchaSetting(on: boolean): Promise<{ captchaEnabled?: boolean } | null | undefined>
   panelLogout(): Promise<unknown>
+  /** 后端就绪状态（局域网地址展示要拼网关端口；其余字段本页不消费） */
+  getBackendStatus?(): Promise<{ port?: number } | null | undefined>
+  // ── 局域网访问（仅桌面端渲染，web 端 shim 不提供这几个方法）──
+  /** 面板管理员是否已注册（开启流程据此决定要不要先走注册步） */
+  panelAdminStatus?(): Promise<{ registered?: boolean } | null | undefined>
+  /** 注册面板管理员（受信本地路径，不走公开的 HTTP 注册端点） */
+  panelRegister?(username: string, password: string): Promise<{ registered?: boolean; existed?: boolean }>
+  /** 切换局域网访问（写设置并重启应用）；返回里的 createdKey 非空 = 已自动补了首把 Key */
+  changeLanAccess?(enabled: boolean, panel: boolean): Promise<unknown>
+  /** 本机在局域网里的地址（查不到为 null） */
+  localIp?(): Promise<string | null | undefined>
   /** 打开外链的唯一出口（只放行 http(s)）：桌面走系统浏览器，网页端 shim 是 window.open */
   openReleasePage?(url: string): Promise<unknown>
 }
@@ -489,6 +507,8 @@ export function normalizeApp(saved: unknown, fallback: AppSettings): AppSettings
     const record = saved as Record<string, unknown>
     if (typeof record.closeToTray === 'boolean') result.closeToTray = record.closeToTray
     if (typeof record.autostart === 'boolean') result.autostart = record.autostart
+    if (typeof record.lanAccess === 'boolean') result.lanAccess = record.lanAccess
+    if (typeof record.lanPanel === 'boolean') result.lanPanel = record.lanPanel
   }
   return result
 }
@@ -547,6 +567,7 @@ export const TIPS = {
   displayZoom: '等比放大或缩小整个界面（文字、控件、间距一起变），效果与浏览器按 Ctrl +/- 相同：80%–130%、5% 一档。窗口本身不缩放，变的是页面内容的显示比例，设置立即生效并记住，下次启动直接按这个比例打开。放得越大可视范围越小，窗口较窄或表格较宽时不建议调得太大。',
   displayLanguage: '界面语言。目前只提供简体中文，所以这里只有这一项可选（选中即当前语言）。以后增加其它语言时，这个列表里会出现对应选项，选择后立即应用到界面。',
   tray: '默认关闭窗口不会退出程序，而是把窗口缩到系统托盘，转发继续在后台运行（OpenAI 客户端不受影响）；要彻底退出程序，请在托盘图标上右键选「退出」。关掉这个开关后，点关闭按钮即退出程序、转发随之中断。「开机自动启动」开启后，登录系统时会自动启动本程序（通常直接驻留托盘），不需要手动打开。',
+  lan: '默认网关只监听 127.0.0.1，只有本机能访问。开启后网关改听所有网卡，同一局域网内的设备可以把 API 地址指向本机 IP 一起使用。出于安全考虑，开启前必须先注册一个面板管理员：管理接口从此要求管理员会话或网关 Key，模型额度不会对局域网裸奔；一把启用的网关 Key 都没有时，转发接口也会拒绝服务，直到创建第一把。改动需要重启应用生效。「同时开放网页管理面板」把管理界面也出给局域网（其他设备的浏览器打开本机 IP 即可管理），默认关闭 —— 桌面端的面板仍只由本程序自己出。',
   units: '控制报表与请求日志里 Token 读数的写法：开启后按中文量级显示（1.2亿 / 8400万），关闭则用 k / M 缩写（与上游文档、接口字段的写法一致）。这只影响显示口径，不改变任何统计与存储的数值。',
   queue: '只对「排队制」的上游生效（目前是 Qoder 的免费模型）：模型繁忙时上游不报错，只回一句「建议 N 秒后再来」（业务码 10605），网关按建议时长等一会儿再发同一请求，等满次数仍排不上才把「排队中」作为错误返回（HTTP 503，文案会说明这不是登录态或额度问题）。等待发生在首个字节之前，吃的是「等待响应超时」那份预算 —— 两项设置一起决定一次请求最多卡多久；排队不会标记账号限额、也不会换账号（换谁都一样在排队）。保存后对下一个请求立即生效，不用重启。',
   timeouts: '上游请求四个阶段各自的等待上限（秒，1~3600）：①「连接中超时」= 建立 TCP/TLS 连接或代理隧道的最大等待，默认 30 秒；②「等待响应超时」= 请求发出后等上游响应头的最大时间，默认 300 秒 —— 网关请求上游恒带 stream，响应头在 SSE 建立时就到达，与模型思考多久无关；③「流式响应空闲超时」= 流式响应相邻两块数据之间允许的最大空闲，收到新数据即重新计时，默认 300 秒 —— 上游长时间不吐数据即判定连接僵死并断开；④「非流式响应超时」= 读完整份非流式响应体的总预算（一次性计时、不重置），默认 300 秒。四项都是「等待上限」，只要数据还在来，正常的流式回答就一直往下传。保存后对下一个请求立即生效，不用重启。',

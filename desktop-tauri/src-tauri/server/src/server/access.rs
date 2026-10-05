@@ -158,6 +158,15 @@ pub fn admin_registered() -> bool {
     panel_auth_enabled()
 }
 
+/// 密码 → bcrypt 哈希（成本因子 10，与 env 预置、htpasswd -nBC 的输出互通）。
+///
+/// 哈希参数只在这一处定义：面板注册（`api::panel`）与桌面壳的注册命令
+/// （绕过 HTTP 闸门的受信本地路径）都要产出同一格式的哈希，参数分叉会让
+/// 两条入口造出互相验证不了的凭证。
+pub fn hash_password(password: &str) -> Result<String, String> {
+    bcrypt::hash(password, 10).map_err(|error| format!("密码加密失败: {error}"))
+}
+
 /// 首次注册管理员（只在无人注册时成功 —— 幂等安全：
 /// 竞争下只有第一个写入者生效，后到的会看到「已注册」）。
 ///

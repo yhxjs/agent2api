@@ -580,6 +580,22 @@ const BRIDGE_JS: &str = r#"
     changePort: port => invoke('change_port', { port: Number(port) }),
     restartApp: () => invoke('restart_app'),
 
+    // ── 本壳特有：局域网访问（issue #48）──
+    // 设置页「局域网访问」面板专用的四条命令。命令说明（管理员前置、自动补
+    // 首把 Key、随重启生效）见 commands.rs 同名命令的注释；网页端 shim 不提供
+    // 这一组（网页面板本身就在局域网可达的 HTTP 端口上，界面按 platform==='web'
+    // 不渲染这一块），与 zcode-claim 那组的教训不同 —— 那组两个形态都要用，
+    // 这组只服务桌面形态。
+    panelAdminStatus: () => invoke('panel_admin_status'),
+    panelRegister: (username, password) =>
+      invoke('panel_register', {
+        username: String(username || '').trim(),
+        password: String(password || ''),
+      }),
+    changeLanAccess: (enabled, panel) =>
+      invoke('change_lan_access', { enabled: enabled === true, panel: panel === true }),
+    localIp: () => invoke('local_ip'),
+
     // ── 本壳特有：窗口主题 ──
     // 三态语义：'dark' / 'light' 把窗口主题钉死，null 交回系统跟随（对应 Rust 侧的 None）。
     // 跟随系统时必须真的传 null，不能整形回只有两态：窗口被手动主题钉住时，

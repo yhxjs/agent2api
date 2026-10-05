@@ -780,9 +780,11 @@ pub async fn login_oauth_captcha_config(body: Bytes) -> Response {
 /// 因此由 `core::login::autoclaw` 去借一个登记端口、并把回调转回这个基址 ——
 /// 判据与回落顺序都在那边（见其 `callback_endpoint`）。
 ///
-/// `local_browser` 的判据是**监听地址是不是 loopback**：桌面壳固定绑
-/// 127.0.0.1；容器 / 远程部署按 `AGENT2API_HOST`（默认 0.0.0.0）—— 那种形态
-/// 下浏览器解析的 `localhost` 是它自己那台机器，占登记端口没有意义。
+/// `local_browser` 的判据是「管理界面是否跑在与网关同一台机器上」：桌面壳恒
+/// 成立（`state.local_panel`，Tauri 窗口就在本机 —— 哪怕开启局域网访问后监听
+/// 地址换成了 0.0.0.0，发起登录的浏览器仍是本机的）；容器 / 远程部署该标记为
+/// false，回落看监听地址（`AGENT2API_HOST`，默认 0.0.0.0）—— 那种形态下浏览器
+/// 解析的 `localhost` 是它自己那台机器，占登记端口没有意义。
 pub async fn login_oauth_start(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = parse_body(&body).unwrap_or(Value::Null);
     let region = autoclaw_region_of(&payload);
@@ -806,7 +808,13 @@ pub async fn login_oauth_start(State(state): State<ServerState>, body: Bytes) ->
     let gateway_base = format!("http://localhost:{api_port}");
     let (handle, warning) = match state
         .login()
-        .start_autoclaw_oauth_login(region, vendor, captcha, &gateway_base, state.host.is_loopback())
+        .start_autoclaw_oauth_login(
+            region,
+            vendor,
+            captcha,
+            &gateway_base,
+            state.local_panel || state.host.is_loopback(),
+        )
         .await
     {
         Ok(result) => result,

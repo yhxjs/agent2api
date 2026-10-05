@@ -183,9 +183,18 @@ pub struct ServerState {
     /// `/v1/*` 网关，静态界面与 `/api/*` 挂到 `p` —— 面板端口可以不暴露公网，
     /// 管理面整体留在内网。桌面壳不设置它。
     pub panel_port: Option<u16>,
-    /// 监听地址。桌面壳固定 127.0.0.1（单机安全边界）；headless 二进制按
-    /// `AGENT2API_HOST` 解析（默认 0.0.0.0，供容器端口映射）。
+    /// 监听地址。桌面壳默认 127.0.0.1（单机安全边界；用户开启局域网访问后为
+    /// 0.0.0.0）；headless 二进制按 `AGENT2API_HOST` 解析（默认 0.0.0.0，供容器
+    /// 端口映射）。
     pub host: IpAddr,
+    /// 管理界面跑在本机（桌面壳的 Tauri 窗口）。
+    ///
+    /// 桌面壳固定 true；headless 恒 false。它与 `host.is_loopback()` 是两个维度：
+    /// 桌面壳开了局域网访问后 host 是 0.0.0.0，但发起管理操作的浏览器（Tauri
+    /// 窗口）仍在本机 —— OAuth 回调该占本机登记端口（见
+    /// `api::session::login_oauth_start` 的 `local_browser`）。headless 不设它，
+    /// 回退按 `host.is_loopback()` 判（容器绑回环没有意义，判 false 是对的）。
+    pub local_panel: bool,
     /// 配置目录（`~/.agent2api`），与壳侧 gateway::config_dir() 同源
     pub config_dir: PathBuf,
     /// headless 下托管管理界面（`ui/` 静态目录）的根；`None` = 不托管
@@ -495,6 +504,7 @@ impl ServerState {
             port,
             panel_port: None,
             host,
+            local_panel: false,
             config_dir,
             ui_dir: None,
             store,

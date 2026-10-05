@@ -109,7 +109,7 @@ pub async fn panel_setup(
     if password.len() < 8 {
         return management_error(400, "密码至少 8 位");
     }
-    let hash = match bcrypt::hash(password, 10) {
+    let hash = match access::hash_password(password) {
         Ok(hash) => hash,
         Err(error) => {
             logging::log("[Security]", &format!("❌ 管理员注册失败：{error}"));
