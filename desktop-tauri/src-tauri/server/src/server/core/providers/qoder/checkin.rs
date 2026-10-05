@@ -46,6 +46,21 @@
 //! 中性结果（`success:false` + 说明），不是错误 —— 把「今天没得领」报成失败
 //! 会让用户以为接口坏了。
 //!
+//! ── 活动列表的「可见性」门控（排障先看这里）────────────────
+//! 上游对请求不合规的反应**不是报错**，而是 HTTP 200 + 列表缺行甚至全空，
+//! 与「账号今天没活动」在 HTTP 层无法区分：
+//!   - `UA: Qoder` / `cosy-clienttype: 10` / `cosy-version` 三个头**缺任何一个**
+//!     → 空活动列表（参考实现实测；见 `endpoints::SASH_CLIENT_VERSION`）；
+//!   - 国际版活动平台还按**官方客户端的机器身份**过滤（UMID，由官方客户端
+//!     组件生成、约 50 分钟刷新）：伪造全套 `cosy-machine*` 六头会被判定为
+//!     非官方客户端、把 CLAIMABLE 行整条滤掉；一个都不发则**国际版可能整包
+//!     不下发**（`showCampaign:false`）。本网关不发机器头 —— 对中国版无影响，
+//!     对国际版是已知限制。
+//!
+//! 因此「没领到」分三种口径：`showCampaign:false` 报「未认可客户端身份」；
+//! 列表有行但没有可领的签到活动报账号侧状态；verbose 日志始终打一份活动行
+//! 摘要供排查。
+//!
 //! ── panic=abort ────────────────────────────────────────────
 //! 本文件零 unwrap/expect/panic，取值全走 Option 链。
 
@@ -55,6 +70,7 @@ use crate::server::core::account_store::AccountStore;
 use crate::server::core::auth_http::ApiResponse;
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::errors::GatewayError;
+use crate::server::logging;
 
 use super::credentials::Credentials;
 use super::{auth, endpoints, refresh};
@@ -107,6 +123,37 @@ pub async fn claim_daily_checkin(
         .cloned()
         .unwrap_or_default();
 
+    // 活动列表的可见性是排障的关键：上游对「头不齐 / 客户端身份不认可」的响应
+    // 是 HTTP 200 + 列表缺行甚至全空（见模块头「可见性门控」），与「账号今天
+    // 没活动」在 HTTP 层无法区分。verbose 打一份行摘要（普通用户不打扰），
+    // 用户开了运行日志 verbose 就能看清这次上游到底回了什么。
+    let summary = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}:{}",
+                row.get("actionType").and_then(Value::as_str).unwrap_or("?"),
+                row.get("claimStatus").and_then(Value::as_str).unwrap_or("?"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    logging::verbose(
+        "[Qoder]",
+        &format!(
+            "签到活动查询（{}）：showCampaign={} 活动行[{}]",
+            credentials.region.id(),
+            list.get("showCampaign")
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "缺".to_string()),
+            if summary.is_empty() { "无" } else { summary.as_str() },
+        ),
+    );
+
+    // `showCampaign` 被明确置 false：服务端没有认可本次请求的客户端身份，
+    // 活动整包不下发 —— 这不是「账号没活动」，单独成一种口径（见 no_claim）。
+    let identity_rejected = matches!(list.get("showCampaign"), Some(Value::Bool(false)));
+
     let mut claimable: Option<&Value> = None;
     let mut claimed = false;
     for row in &rows {
@@ -121,7 +168,7 @@ pub async fn claim_daily_checkin(
     }
 
     let Some(target) = claimable else {
-        return Ok(no_claim(claimed));
+        return Ok(no_claim(claimed, identity_rejected));
     };
     let campaign_id = target.get("campaignId").and_then(Value::as_str).unwrap_or("");
     if !is_safe_campaign_id(campaign_id) {
@@ -281,13 +328,25 @@ fn result_of(response: &ApiResponse) -> Option<String> {
     }
 }
 
-/// 「这次没领到」的结果：区分「今天已领」与「没有可领的活动」。
-fn no_claim(claimed: bool) -> Value {
+/// 「这次没领到」的结果：区分「今天已领」「服务端没下发活动」与「没有可领的活动」。
+///
+/// ── 为什么「身份未认可」要单独成一种口径 ──────────────────
+/// 国际版活动平台按官方客户端的机器身份（UMID）过滤请求，本网关不带机器头时
+/// 服务端可能整包不下发活动（`showCampaign:false`，见模块头「可见性门控」）。
+/// 把它报成「今天没有活动」会让用户白等一天再回来问；如实说明是已知限制、
+/// 并指一条官方客户端的核对路径，才是这条消息该干的活。
+fn no_claim(claimed: bool, identity_rejected: bool) -> Value {
     if claimed {
         return json!({
             "success": false,
             "alreadyCompleted": true,
             "msg": "今日已领取",
+        });
+    }
+    if identity_rejected {
+        return json!({
+            "success": false,
+            "msg": "服务端未认可本次客户端身份、未下发活动列表（国际版活动平台按官方客户端的机器身份过滤，这是已知限制）；可在官方客户端的活动页确认该账号今天是否有可领活动",
         });
     }
     // 没有可领的活动是账号侧状态（免费档账号两个地区都有实测：活动列表里只有
@@ -377,17 +436,25 @@ mod tests {
         assert!(!same_person_blocked(&json!({"status": "CLAIMED"})));
     }
 
-    /// 「没领到」的结果：已领带 `alreadyCompleted`，没活动不带 ——
-    /// `billing::checkin` 据它决定要不要落 `checkinAt`。
+    /// 「没领到」的结果三态：已领带 `alreadyCompleted`；身份未认可与「没活动」
+    /// 都不带它（不能落 `checkinAt`），但文案要分开 —— 前者是网关侧已知限制，
+    /// 后者是账号侧状态，混成一句会让用户往错误的方向排查。
     #[test]
     fn no_claim_distinguishes_already_claimed_from_no_campaign() {
-        let claimed = no_claim(true);
+        let claimed = no_claim(true, false);
         assert_eq!(claimed.get("alreadyCompleted"), Some(&json!(true)));
-        let none = no_claim(false);
+
+        let none = no_claim(false, false);
         assert_eq!(none.get("alreadyCompleted"), None);
         assert_eq!(
             none.get("msg").and_then(Value::as_str),
             Some("当前没有可领取的签到活动"),
         );
+
+        let rejected = no_claim(false, true);
+        assert_eq!(rejected.get("alreadyCompleted"), None);
+        let msg = rejected.get("msg").and_then(Value::as_str).unwrap_or("");
+        assert!(msg.contains("未认可") && msg.contains("机器身份"));
+        assert!(!msg.contains("没有可领取的签到活动"));
     }
 }

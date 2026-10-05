@@ -146,16 +146,29 @@ pub const CAMPAIGNS_QUERY: &str = "?forceRefresh=true";
 /// CPA 的 qoder 插件）都用 10。
 pub const SASH_CLIENT_TYPE: &str = "10";
 
+/// `cosy-version` 的值：官方桌面端版本号。
+///
+/// **它与 clienttype 一样在门控活动列表**：参考实现实测 `UA: Qoder` /
+/// `cosy-clienttype` / `cosy-version` 三个头**缺任何一个**，服务端不报错但
+/// 返回**空活动列表**（qoder2api-hub 实测，2026-10）；cpa 系插件在国际版
+/// （openapi.qoder.sh，2026-09-21 实测）也始终带着它（值 0.3.4，老一档的
+/// 桌面端版本）。这里取较新的官方桌面端版本号；上游对旧值不拒绝（cpa 的
+/// 0.3.4 一直可用），说明该头只要求「存在且像桌面端」，不校验具体值。
+pub const SASH_CLIENT_VERSION: &str = "0.4.3";
+
 /// `user-agent`：抓包确认的客户端标识（参考实现同值）
 pub const SASH_USER_AGENT: &str = "Qoder";
 
 /// 活动/签到接口的请求头：**最小束、无签名**。
 ///
 /// 小写头名是照抄抓包结果（HTTP 头名大小写不敏感，但保持一致便于对拍）。
+/// `user-agent` / `cosy-clienttype` / `cosy-version` 三个都在门控活动列表
+/// （见 [`SASH_CLIENT_VERSION`]），**一个都不能少**。
 pub fn sash_headers(token: &str) -> Vec<(String, String)> {
     vec![
         ("authorization".to_string(), format!("Bearer {token}")),
         ("cosy-clienttype".to_string(), SASH_CLIENT_TYPE.to_string()),
+        ("cosy-version".to_string(), SASH_CLIENT_VERSION.to_string()),
         ("accept".to_string(), "application/json".to_string()),
         ("accept-language".to_string(), "zh-CN".to_string()),
         ("user-agent".to_string(), SASH_USER_AGENT.to_string()),
